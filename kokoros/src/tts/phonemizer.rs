@@ -9,6 +9,32 @@ lazy_static! {
     static ref NINETY_PATTERN: Regex = Regex::new(r"(?<=nˈaɪn)ti(?!ː)").unwrap();
 }
 
+use std::{error::Error as StdError, fmt};
+
+#[derive(Debug)]
+pub enum BackendError {
+    UnsupportedLanguage(String),
+    NoEspeakForLanguage(String),
+    EspeakInitFailed,
+}
+
+impl fmt::Display for BackendError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            BackendError::UnsupportedLanguage(lang) => write!(f, "Unsupported language: {lang}"),
+            BackendError::NoEspeakForLanguage(lang) => {
+                write!(
+                    f,
+                    "Espeak backend not used for language: {lang} (Chinese/Japanese)"
+                )
+            }
+            BackendError::EspeakInitFailed => write!(f, "Failed to initialize Espeak backend"),
+        }
+    }
+}
+
+impl StdError for BackendError {}
+
 // Placeholder for the EspeakBackend struct
 struct EspeakBackend {
     language: String,
@@ -38,16 +64,31 @@ pub struct Phonemizer {
 }
 
 impl Phonemizer {
-    pub fn new(lang: &str) -> Self {
-        let backend = match lang {
-            "a" => EspeakBackend::new("en-us", true, true),
-            "b" => EspeakBackend::new("en-gb", true, true),
-            _ => panic!("Unsupported language"),
-        };
+    pub fn new(lang: &str) -> Result<Self, BackendError> {
+        let backend = Self::build_backend(lang)?;
 
-        Phonemizer {
+        Ok(Phonemizer {
             lang: lang.to_string(),
             backend,
+        })
+    }
+
+    fn build_backend(lang: &str) -> Result<EspeakBackend, BackendError> {
+        let lang_code =
+            Self::lang_code(lang).ok_or(BackendError::UnsupportedLanguage(lang.to_string()))?;
+        Ok(EspeakBackend::new(lang_code, true, true))
+    }
+
+    fn lang_code(lang: &str) -> Option<&'static str> {
+        match lang {
+            "a" => Some("en-us"),
+            "b" => Some("en-gb"),
+            "e" => Some("es"),
+            "f" => Some("fr-fr"),
+            "h" => Some("hi"),
+            "i" => Some("it"),
+            "p" => Some("pt-br"),
+            _ => None,
         }
     }
 
