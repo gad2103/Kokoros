@@ -37,7 +37,7 @@ impl Phonemizer {
             "a" | "en-us" => MISAKI_EN_US.g2p(&text).0,
             "b" | "en-gb" => MISAKI_EN_GB.g2p(&text).0,
             _ => {
-                let _guard = ESPEAK_MUTEX.lock().unwrap();
+                let _guard = ESPEAK_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
                 text_to_phonemes(&text, &self.lang, None, true, false)
                     .unwrap_or_default()
                     .join("")
