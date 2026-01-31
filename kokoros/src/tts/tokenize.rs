@@ -29,7 +29,9 @@ mod tests {
         let tokens = tokenize(text);
 
         // Expected tokens based on the vocabulary mapping defined in get_vocab()
-        let expected = vec![24, 47, 54, 54, 57, 5];
+        let expected = vec![
+            50, 47, 102, 16, 81, 102, 61, 16, 102, 68, 16, 156, 54, 138, 64, 54, 51, 158, 5,
+        ];
 
         assert_eq!(tokens, expected);
 

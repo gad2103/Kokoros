@@ -1,8 +1,8 @@
 use crate::onn::ort_koko::{self, ModelStrategy};
+use crate::tts::phonemizer::Phonemizer;
 use crate::tts::tokenize::tokenize;
 use crate::utils;
 use crate::utils::debug::format_debug_prefix;
-use lazy_static::lazy_static;
 use ndarray::Array3;
 use ndarray_npy::NpzReader;
 use std::collections::HashMap;
@@ -11,14 +11,6 @@ use std::fs::File;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-
-use espeak_rs::text_to_phonemes;
-
-// Global mutex to serialize espeak-rs calls to prevent phoneme randomization
-// espeak-rs uses global state internally and is not thread-safe
-lazy_static! {
-    static ref ESPEAK_MUTEX: Mutex<()> = Mutex::new(());
-}
 
 // Flag to ensure voice styles are only logged once
 static VOICES_LOGGED: AtomicBool = AtomicBool::new(false);
@@ -148,7 +140,8 @@ impl TTSKoko {
         chunk_number_start: Option<usize>,
         mut mode: ExecutionMode,
     ) -> Result<Option<(Vec<f32>, Vec<WordAlignment>)>, Box<dyn std::error::Error>> {
-        let chunks = self.split_text_into_chunks(txt, 500, lan);
+        let phonemizer = Phonemizer::new(lan);
+        let chunks = self.split_text_into_chunks(txt, 500, &phonemizer);
 
         let start_chunk_num = chunk_number_start.unwrap_or(0);
 
@@ -168,10 +161,10 @@ impl TTSKoko {
             };
 
             let (mut tokens, word_map) = if use_alignment {
-                self.tokenize_with_alignment(chunk, lan)
+                self.tokenize_with_alignment(chunk, &phonemizer)
             } else {
                 // Fast path for audio-only models: single eSpeak pass, no per-item calls
-                self.tokenize_full_no_alignment(chunk, lan)
+                self.tokenize_full_no_alignment(chunk, &phonemizer)
             };
 
             // Log token count (helpful for debugging context limits)
@@ -375,7 +368,7 @@ impl TTSKoko {
     fn tokenize_with_alignment(
         &self,
         text: &str,
-        lan: &str,
+        phonemizer: &Phonemizer,
     ) -> (Vec<i64>, Vec<(String, usize, usize)>) {
         // We will produce tokens from the full, context-aware phonemes (best prosody)
         // and build an alignment map by estimating per-word token spans using
@@ -383,12 +376,7 @@ impl TTSKoko {
         // robust timestamps even when eSpeak merges words (e.g., "the model").
 
         // 1) Full-phrase phonemes and tokens (prosody source)
-        let full_phonemes = {
-            let _guard = ESPEAK_MUTEX.lock().unwrap();
-            text_to_phonemes(text, lan, None, true, false)
-                .unwrap_or_default()
-                .join("")
-        };
+        let full_phonemes = phonemizer.phonemize(text, false);
         let all_tokens = tokenize(&full_phonemes);
 
         // 2) Build a tokenization plan per original "word or punctuation" unit.
@@ -443,12 +431,7 @@ impl TTSKoko {
                 per_item_token_counts.push(0);
                 per_item_is_punct.push(true);
             } else {
-                let ph = {
-                    let _guard = ESPEAK_MUTEX.lock().unwrap();
-                    text_to_phonemes(it, lan, None, true, false)
-                        .unwrap_or_default()
-                        .join("")
-                };
+                let ph = phonemizer.phonemize(it, false);
                 let cnt = tokenize(&ph).len();
                 per_item_token_counts.push(cnt);
                 per_item_is_punct.push(false);
@@ -527,19 +510,19 @@ impl TTSKoko {
     fn tokenize_full_no_alignment(
         &self,
         text: &str,
-        lan: &str,
+        phonemizer: &Phonemizer,
     ) -> (Vec<i64>, Vec<(String, usize, usize)>) {
-        let full_phonemes = {
-            let _guard = ESPEAK_MUTEX.lock().unwrap();
-            text_to_phonemes(text, lan, None, true, false)
-                .unwrap_or_default()
-                .join("")
-        };
+        let full_phonemes = phonemizer.phonemize(text, false);
         let all_tokens = tokenize(&full_phonemes);
         (all_tokens, Vec::new())
     }
 
-    fn split_text_into_chunks(&self, text: &str, max_tokens: usize, lan: &str) -> Vec<String> {
+    fn split_text_into_chunks(
+        &self,
+        text: &str,
+        max_tokens: usize,
+        phonemizer: &Phonemizer,
+    ) -> Vec<String> {
         let mut chunks = Vec::new();
 
         // First split by sentences - using common sentence ending punctuation
@@ -555,12 +538,7 @@ impl TTSKoko {
             let sentence = format!("{}.", sentence.trim());
 
             // Convert to phonemes to check token count
-            let sentence_phonemes = {
-                let _guard = ESPEAK_MUTEX.lock().unwrap();
-                text_to_phonemes(&sentence, lan, None, true, false)
-                    .unwrap_or_default()
-                    .join("")
-            };
+            let sentence_phonemes = phonemizer.phonemize(&sentence, false);
             let token_count = tokenize(&sentence_phonemes).len();
 
             if token_count > max_tokens {
@@ -575,12 +553,7 @@ impl TTSKoko {
                         format!("{} {}", word_chunk, word)
                     };
 
-                    let test_phonemes = {
-                        let _guard = ESPEAK_MUTEX.lock().unwrap();
-                        text_to_phonemes(&test_chunk, lan, None, true, false)
-                            .unwrap_or_default()
-                            .join("")
-                    };
+                    let test_phonemes = phonemizer.phonemize(&test_chunk, false);
                     let test_tokens = tokenize(&test_phonemes).len();
 
                     if test_tokens > max_tokens {
@@ -599,12 +572,7 @@ impl TTSKoko {
             } else if !current_chunk.is_empty() {
                 // Try to append to current chunk
                 let test_text = format!("{} {}", current_chunk, sentence);
-                let test_phonemes = {
-                    let _guard = ESPEAK_MUTEX.lock().unwrap();
-                    text_to_phonemes(&test_text, lan, None, true, false)
-                        .unwrap_or_default()
-                        .join("")
-                };
+                let test_phonemes = phonemizer.phonemize(&test_text, false);
                 let test_tokens = tokenize(&test_phonemes).len();
 
                 if test_tokens > max_tokens {
