@@ -1,5 +1,5 @@
 use crate::onn::ort_koko::{self, ModelStrategy};
-use crate::tts::phonemizer::Phonemizer;
+use crate::tts::phonemizer::{Phonemizer, PhonemeMap};
 use crate::tts::tokenize::tokenize;
 use crate::utils;
 use crate::utils::debug::format_debug_prefix;
@@ -63,6 +63,7 @@ pub struct TTSKoko {
     model_path: String,
     model: Arc<Mutex<ort_koko::OrtKoko>>,
     styles: HashMap<String, Vec<[[f32; 256]; 1]>>,
+    pub phoneme_map: Option<Arc<PhonemeMap>>,
     init_config: InitConfig,
 }
 
@@ -73,6 +74,7 @@ pub struct TTSKokoParallel {
     model_path: String,
     models: Vec<Arc<Mutex<ort_koko::OrtKoko>>>,
     styles: HashMap<String, Vec<[[f32; 256]; 1]>>,
+    pub phoneme_map: Option<Arc<PhonemeMap>>,
     init_config: InitConfig,
 }
 
@@ -124,8 +126,14 @@ impl TTSKoko {
             model_path: model_path.to_string(),
             model,
             styles,
+            phoneme_map: None,
             init_config: cfg,
         }
+    }
+
+    pub fn with_phoneme_map(mut self, map: Arc<PhonemeMap>) -> Self {
+        self.phoneme_map = Some(map);
+        self
     }
 
     fn process_internal(
@@ -140,7 +148,10 @@ impl TTSKoko {
         chunk_number_start: Option<usize>,
         mut mode: ExecutionMode,
     ) -> Result<Option<(Vec<f32>, Vec<WordAlignment>)>, Box<dyn std::error::Error>> {
-        let phonemizer = Phonemizer::new(lan);
+        let mut phonemizer = Phonemizer::new(lan);
+        if let Some(map) = &self.phoneme_map {
+            phonemizer = phonemizer.with_phoneme_map(Arc::clone(map));
+        }
         let chunks = self.split_text_into_chunks(txt, 500, &phonemizer);
 
         let start_chunk_num = chunk_number_start.unwrap_or(0);
@@ -383,42 +394,6 @@ impl TTSKoko {
         //    We want punctuation timestamps too, so we split words and punctuation as separate items.
         //    Simple heuristic: split on whitespace, then further split trailing/leading punctuation
         //    for .,!?;: characters.
-        fn split_words_and_punct(s: &str) -> Vec<String> {
-            let mut out = Vec::new();
-            for raw in s.split_whitespace() {
-                let chars: Vec<char> = raw.chars().collect();
-                let mut start = 0usize;
-                let mut end = chars.len();
-
-                // Leading punctuation
-                while start < end {
-                    let c = chars[start];
-                    if ".,!?:;".contains(c) {
-                        out.push(c.to_string());
-                        start += 1;
-                    } else {
-                        break;
-                    }
-                }
-                // Trailing punctuation
-                while end > start {
-                    let c = chars[end - 1];
-                    if ".,!?:;".contains(c) {
-                        end -= 1;
-                    } else {
-                        break;
-                    }
-                }
-                if start < end {
-                    out.push(chars[start..end].iter().collect());
-                }
-                // Push trailing punctuation in original order
-                for i in end..chars.len() {
-                    out.push(chars[i].to_string());
-                }
-            }
-            out
-        }
 
         let items = split_words_and_punct(text);
 
@@ -484,9 +459,17 @@ impl TTSKoko {
                 // Zero-length marker at current cursor
                 word_map.push((item.clone(), cursor, cursor));
             } else {
+                let mut word_to_record = item.clone();
+                // If it's an override, extract the word
+                if let Ok(Some(caps)) = crate::tts::phonemizer::OVERRIDE_RE.captures(item) {
+                    if let Some(word_cap) = caps.get(1) {
+                        word_to_record = word_cap.as_str().to_string();
+                    }
+                }
+
                 let start_idx = cursor;
                 let end_idx = cursor.saturating_add(cnt);
-                word_map.push((item.clone(), start_idx, end_idx));
+                word_map.push((word_to_record, start_idx, end_idx));
                 cursor = end_idx;
             }
         }
@@ -1073,8 +1056,14 @@ impl TTSKokoParallel {
             model_path: model_path.to_string(),
             models,
             styles,
+            phoneme_map: None,
             init_config: cfg,
         }
+    }
+
+    pub fn with_phoneme_map(mut self, map: Arc<PhonemeMap>) -> Self {
+        self.phoneme_map = Some(map);
+        self
     }
 
     /// Get a specific model instance for a worker
@@ -1090,6 +1079,7 @@ impl TTSKokoParallel {
             model: model_instance,
             // TODO: This clones the HashMap. In a future PR, wrap styles in Arc<>!
             styles: self.styles.clone(),
+            phoneme_map: self.phoneme_map.clone(),
             init_config: self.init_config.clone(),
         }
     }
@@ -1154,6 +1144,7 @@ impl TTSKokoParallel {
             model_path: self.model_path.clone(),
             model: Arc::clone(&self.models[0]), // Just for interface compatibility
             styles: self.styles.clone(),
+            phoneme_map: self.phoneme_map.clone(),
             init_config: self.init_config.clone(),
         };
         temp_tts.split_text_into_speech_chunks(text, max_words)
@@ -1164,5 +1155,89 @@ impl TTSKokoParallel {
         let mut voices: Vec<String> = self.styles.keys().cloned().collect();
         voices.sort();
         voices
+    }
+}
+
+fn split_words_and_punct(s: &str) -> Vec<String> {
+    use crate::tts::phonemizer::OVERRIDE_RE;
+    let mut out = Vec::new();
+
+    let mut last_match = 0;
+    for mat_res in OVERRIDE_RE.find_iter(s) {
+        if let Ok(mat) = mat_res {
+            let start = mat.start();
+            let end = mat.end();
+
+            // Process preceding text
+            if start > last_match {
+                let segment = &s[last_match..start];
+                for raw in segment.split_whitespace() {
+                    process_raw_word(raw, &mut out);
+                }
+            }
+
+            // Add the override as a single item
+            out.push(s[start..end].to_string());
+            last_match = end;
+        }
+    }
+
+    // Process remaining text
+    if last_match < s.len() {
+        let segment = &s[last_match..];
+        for raw in segment.split_whitespace() {
+            process_raw_word(raw, &mut out);
+        }
+    }
+
+    fn process_raw_word(raw: &str, out: &mut Vec<String>) {
+        let chars: Vec<char> = raw.chars().collect();
+        let mut start = 0usize;
+        let mut end = chars.len();
+
+        // Leading punctuation
+        while start < end {
+            let c = chars[start];
+            if ".,!?:;".contains(c) {
+                out.push(c.to_string());
+                start += 1;
+            } else {
+                break;
+            }
+        }
+        // Trailing punctuation
+        while end > start {
+            let c = chars[end - 1];
+            if ".,!?:;".contains(c) {
+                end -= 1;
+            } else {
+                break;
+            }
+        }
+        if start < end {
+            out.push(chars[start..end].iter().collect());
+        }
+        // Push trailing punctuation in original order
+        for i in end..chars.len() {
+            out.push(chars[i].to_string());
+        }
+    }
+
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_split_words_and_punct_with_overrides() {
+        let text = "Hello [Los Angeles](/lˈɔːs_ˈændʒələs/) city!";
+        let items = split_words_and_punct(text);
+        println!("Items: {:?}", items);
+        assert_eq!(items[0], "Hello");
+        assert_eq!(items[1], "[Los Angeles](/lˈɔːs_ˈændʒələs/)");
+        assert_eq!(items[2], "city");
+        assert_eq!(items[3], "!");
     }
 }
