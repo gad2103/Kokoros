@@ -62,7 +62,7 @@ pub struct TTSKoko {
     #[allow(dead_code)]
     model_path: String,
     model: Arc<Mutex<ort_koko::OrtKoko>>,
-    styles: HashMap<String, Vec<[[f32; 256]; 1]>>,
+    styles: Arc<HashMap<String, Vec<[[f32; 256]; 1]>>>,
     pub phoneme_map: Option<Arc<PhonemeMap>>,
     init_config: InitConfig,
 }
@@ -73,7 +73,7 @@ pub struct TTSKokoParallel {
     #[allow(dead_code)]
     model_path: String,
     models: Vec<Arc<Mutex<ort_koko::OrtKoko>>>,
-    styles: HashMap<String, Vec<[[f32; 256]; 1]>>,
+    styles: Arc<HashMap<String, Vec<[[f32; 256]; 1]>>>,
     pub phoneme_map: Option<Arc<PhonemeMap>>,
     init_config: InitConfig,
 }
@@ -878,7 +878,7 @@ impl TTSKoko {
         tokens_len: usize,
     ) -> Result<Vec<Vec<f32>>, Box<dyn std::error::Error>> {
         if !style_name.contains("+") {
-            if let Some(style) = self.styles.get(style_name) {
+            if let Some(style) = self.styles.as_ref().get(style_name) {
                 let styles = vec![style[tokens_len][0].to_vec()];
                 Ok(styles)
             } else {
@@ -904,7 +904,7 @@ impl TTSKoko {
             let mut blended_style = vec![vec![0.0; 256]; 1];
 
             for (name, portion) in style_names.iter().zip(style_portions.iter()) {
-                if let Some(style) = self.styles.get(*name) {
+                if let Some(style) = self.styles.as_ref().get(*name) {
                     let style_slice = &style[tokens_len][0]; // This is a [256] array
                     // Blend into the blended_style
                     for j in 0..256 {
@@ -917,7 +917,7 @@ impl TTSKoko {
         }
     }
 
-    fn load_voices(voices_path: &str) -> HashMap<String, Vec<[[f32; 256]; 1]>> {
+    fn load_voices(voices_path: &str) -> Arc<HashMap<String, Vec<[[f32; 256]; 1]>>> {
         let mut npz = NpzReader::new(File::open(voices_path).unwrap()).unwrap();
         let mut map = HashMap::new();
 
@@ -990,12 +990,12 @@ impl TTSKoko {
             voices
         };
 
-        map
+        Arc::new(map)
     }
 
     // Returns a sorted list of available voice names
     pub fn get_available_voices(&self) -> Vec<String> {
-        let mut voices: Vec<String> = self.styles.keys().cloned().collect();
+        let mut voices: Vec<String> = self.styles.as_ref().keys().cloned().collect();
         voices.sort();
         voices
     }
@@ -1077,7 +1077,6 @@ impl TTSKokoParallel {
         TTSKoko {
             model_path: self.model_path.clone(),
             model: model_instance,
-            // TODO: This clones the HashMap. In a future PR, wrap styles in Arc<>!
             styles: self.styles.clone(),
             phoneme_map: self.phoneme_map.clone(),
             init_config: self.init_config.clone(),

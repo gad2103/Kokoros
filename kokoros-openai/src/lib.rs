@@ -34,6 +34,7 @@ use axum::{
 use futures::stream::StreamExt;
 use kokoros::{
     tts::koko::{InitConfig as TTSKokoInitConfig, TTSKoko},
+    tts::phonemizer::PhonemeMap,
     utils::mp3::pcm_to_mp3,
     utils::opus::pcm_to_opus_ogg,
     utils::wav::{WavHeader, write_audio_chunk},
@@ -350,6 +351,9 @@ struct SpeechRequest {
     #[serde(default)]
     stream: Option<bool>,
 
+    #[serde(default)]
+    phonemes: Option<std::collections::HashMap<String, String>>,
+
     // OpenAI API compatibility parameters - accepted but not implemented
     // These fields ensure request parsing compatibility with OpenAI clients
     /// Return download link after generation (not implemented)
@@ -543,6 +547,7 @@ async fn handle_tts(
         speed: Speed(speed),
         initial_silence,
         stream,
+        phonemes,
         ..
     } = speech_request;
 
@@ -558,6 +563,18 @@ async fn handle_tts(
         colored_request_id, stream, should_stream
     );
 
+    // Handle per-request phoneme map
+    let mut tts_single = tts_single.clone();
+    if let Some(req_phonemes) = phonemes {
+        let mut final_map = if let Some(global_map) = &tts_single.phoneme_map {
+            global_map.as_ref().map.clone()
+        } else {
+            std::collections::HashMap::new()
+        };
+        final_map.extend(req_phonemes);
+        tts_single = tts_single.with_phoneme_map(Arc::new(PhonemeMap::new(final_map)));
+    }
+
     if should_stream {
         return handle_tts_streaming(
             tts_instances,
@@ -568,6 +585,7 @@ async fn handle_tts(
             initial_silence,
             request_id,
             request_start,
+            tts_single.phoneme_map.clone(),
         )
         .await;
     }
@@ -659,6 +677,7 @@ async fn handle_tts_streaming(
     initial_silence: Option<usize>,
     request_id: String,
     request_start: Instant,
+    phoneme_map: Option<Arc<PhonemeMap>>,
 ) -> Result<Response, SpeechError> {
     // Streaming implementation: PCM format for optimal performance
     let content_type = match response_format {
@@ -756,8 +775,16 @@ async fn handle_tts_streaming(
                         let request_id_clone = request_id.clone();
 
                         // Process chunk with dedicated TTS instance (alternates between instances)
-                        let (tts_instance, actual_instance_id) =
+                        let (mut tts_instance, actual_instance_id) =
                             worker_pool_clone.get_instance(chunk_counter);
+
+                        // Wrap with per-request phoneme map if provided
+                        if let Some(map) = phoneme_map.clone() {
+                            let mut tts_wrapped = tts_instance.as_ref().clone();
+                            tts_wrapped = tts_wrapped.with_phoneme_map(map);
+                            tts_instance = Arc::new(tts_wrapped);
+                        }
+
                         let chunk_text = task.chunk.clone();
                         let voice = task.voice.clone();
                         let speed = task.speed;
