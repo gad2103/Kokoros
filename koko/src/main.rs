@@ -144,6 +144,10 @@ struct Cli {
     #[arg(long = "initial-silence", value_name = "INITIAL_SILENCE")]
     initial_silence: Option<usize>,
 
+    /// Path to a JSON dictionary file for phoneme overrides
+    #[arg(long = "dict", value_name = "DICT_PATH")]
+    dict_path: Option<String>,
+
     /// Also output a sidecar TSV file with word-level timestamps
     #[arg(long = "timestamps", default_value_t = false, global = true)]
     timestamps: bool,
@@ -260,13 +264,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             style,
             speed,
             initial_silence,
+            dict_path,
             mono,
             timestamps,
             instances,
             mode,
         } = Cli::parse();
 
-        let tts = TTSKoko::new(&model_path, &data_path).await;
+        let mut tts = TTSKoko::new(&model_path, &data_path).await;
+
+        let phoneme_map = if let Some(dict_path) = &dict_path {
+            let dict_content = fs::read_to_string(dict_path)?;
+            let map: std::collections::HashMap<String, String> = serde_json::from_str(&dict_content)?;
+            Some(std::sync::Arc::new(kokoros::tts::phonemizer::PhonemeMap::new(map)))
+        } else {
+            None
+        };
+
+        if let Some(map) = &phoneme_map {
+            tts = tts.with_phoneme_map(std::sync::Arc::clone(map));
+        }
 
         match mode {
             Mode::File {
@@ -386,7 +403,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         i + 1,
                         instances
                     );
-                    let instance = TTSKoko::new(&model_path, &data_path).await;
+                    let mut instance = TTSKoko::new(&model_path, &data_path).await;
+                    if let Some(map) = &phoneme_map {
+                        instance = instance.with_phoneme_map(std::sync::Arc::clone(map));
+                    }
                     tts_instances.push(instance);
                 }
                 let app = kokoros_openai::create_server(tts_instances).await;

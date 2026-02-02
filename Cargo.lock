@@ -1097,6 +1097,7 @@ dependencies = [
  "clap",
  "kokoros",
  "kokoros-openai",
+ "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",
