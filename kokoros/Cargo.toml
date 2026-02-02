@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 espeak-rs = "0.1.9"
-misaki-rs = { git = "https://github.com/gad2103/misaki-rs", branch = "main" }
+misaki-rs = { git = "https://github.com/gad2103/misaki-rs", tag = "v0.3.0" }
 hound = "3.5.1"
 indicatif = "0.17.11"
 ndarray = "0.16.1"
